@@ -3,14 +3,14 @@ from sqlalchemy import create_engine, text
 import pandas as pd
 import datetime
 
-# Database connection strings for each node with autocommit configuration
-DB_SERVER0 = "mysql+pymysql://root:12345@ccscloud.dlsu.edu.ph:20272/mco2?autocommit=true"
-DB_SERVER1 = "mysql+pymysql://root:12345@ccscloud.dlsu.edu.ph:20282/mco2?autocommit=true"
-DB_SERVER2 = "mysql+pymysql://root:12345@ccscloud.dlsu.edu.ph:20292/mco2?autocommit=true"
+# Database connection strings for each node
+DB_SERVER0 = "mysql+pymysql://root:12345@ccscloud.dlsu.edu.ph:20272/mco2"
+DB_SERVER1 = "mysql+pymysql://root:12345@ccscloud.dlsu.edu.ph:20282/mco2"
+DB_SERVER2 = "mysql+pymysql://root:12345@ccscloud.dlsu.edu.ph:20292/mco2"
 
 # Establish a connection to a database
 def get_db_connection(db_url):
-    engine = create_engine(db_url, isolation_level="AUTOCOMMIT")
+    engine = create_engine(db_url)
     return engine.connect()
 
 # Fetch data from the database
@@ -18,6 +18,7 @@ def fetch_data(offset=0, limit=100):
     query = f"SELECT * FROM app_info LIMIT {limit} OFFSET {offset}"
     with get_db_connection(DB_SERVER0) as connection:
         df = pd.read_sql(query, connection)
+        
     return df
 
 # Fetch a single record by info_id
@@ -30,8 +31,18 @@ def fetch_record_by_info_id(info_id):
 
 # Insert data into the database
 def insert_data(data, db_url):
+    query = text("""
+        INSERT INTO app_info (info_id, name, release_date, price, discount_dlc_count, about, achievements, notes, developers, publishers, categories, genres, tags)
+        VALUES (:info_id, :name, :release_date, :price, :discount_dlc_count, :about, :achievements, :notes, :developers, :publishers, :categories, :genres, :tags)
+    """)
     with get_db_connection(db_url) as connection:
-        data.to_sql('app_info', con=connection, if_exists='append', index=False)
+        trans = connection.begin()
+        try:
+            connection.execute(query, data)
+            trans.commit()
+        except Exception as e:
+            trans.rollback()
+            raise e
 
 # Update data in the database
 def update_data(info_id, updated_data, db_url):
@@ -52,13 +63,25 @@ def update_data(info_id, updated_data, db_url):
         WHERE info_id = :info_id
     """)
     with get_db_connection(db_url) as connection:
-        connection.execute(query, updated_data)
+        trans = connection.begin()
+        try:
+            connection.execute(query, updated_data)
+            trans.commit()
+        except Exception as e:
+            trans.rollback()
+            raise e
 
 # Delete data from the database
 def delete_data(info_id, db_url):
     query = text("DELETE FROM app_info WHERE info_id = :info_id")
     with get_db_connection(db_url) as connection:
-        connection.execute(query, {'info_id': info_id})
+        trans = connection.begin()
+        try:
+            connection.execute(query, {'info_id': info_id})
+            trans.commit()
+        except Exception as e:
+            trans.rollback()
+            raise e
 
 # Check if info_id already exists in the database
 def check_duplicate_info_id(info_id):
@@ -69,7 +92,7 @@ def check_duplicate_info_id(info_id):
 
 # Streamlit application
 st.sidebar.title("CRUD Operations")
-page = st.sidebar.selectbox("Select a Page", ["View Data", "Add Record", "Update Record", "Delete Record"])
+page = st.sidebar.selectbox("Select a Page", ["View Data", "Add Record", "Update Record", "Delete Record", "Search Record"])
 
 if page == "View Data":
     st.title("Steam Games Dataset Viewer - Server0")
@@ -119,22 +142,22 @@ elif page == "Add Record":
         if check_duplicate_info_id(info_id):
             st.error("A record with this Info ID already exists. Please use a unique Info ID.")
         else:
-            # Create a DataFrame from the form input
-            new_record = pd.DataFrame({
-                'info_id': [info_id],
-                'name': [name],
-                'release_date': [release_date.strftime('%Y-%m-%d')],
-                'price': [price],
-                'discount_dlc_count': [discount_dlc_count],
-                'about': [about],
-                'achievements': [achievements],
-                'notes': [notes],
-                'developers': [developers],
-                'publishers': [publishers],
-                'categories': [categories],
-                'genres': [genres],
-                'tags': [tags]
-            })
+            # Prepare data for insertion
+            new_record = {
+                'info_id': info_id,
+                'name': name,
+                'release_date': release_date.strftime('%Y-%m-%d'),
+                'price': price,
+                'discount_dlc_count': discount_dlc_count,
+                'about': about,
+                'achievements': achievements,
+                'notes': notes,
+                'developers': developers,
+                'publishers': publishers,
+                'categories': categories,
+                'genres': genres,
+                'tags': tags
+            }
 
             # Insert data into the central node (Server0)
             insert_data(new_record, DB_SERVER0)
@@ -151,81 +174,84 @@ elif page == "Add Record":
 elif page == "Update Record":
     st.title("Update an Existing Record")
 
-    # Search for the record by info_id
-    search_id = st.number_input("Enter Info ID to search", min_value=1, step=1)
-    search_button = st.button("Search")
+    # Form to update a record
+    with st.form("update_record_form"):
+        info_id = st.number_input("Info ID", min_value=1, step=1)
+        name = st.text_input("Name")
+        release_date = st.date_input("Release Date", value=datetime.date.today())
+        price = st.number_input("Price", min_value=0.0, step=0.01)
+        discount_dlc_count = st.number_input("Discount DLC Count", min_value=0, step=1)
+        about = st.text_area("About")
+        achievements = st.number_input("Achievements", min_value=0, step=1)
+        notes = st.text_area("Notes")
+        developers = st.text_input("Developers")
+        publishers = st.text_input("Publishers")
+        categories = st.text_input("Categories")
+        genres = st.text_input("Genres")
+        tags = st.text_input("Tags")
+        submit = st.form_submit_button("Update Record")
 
-    if search_button:
-        record = fetch_record_by_info_id(search_id)
-        if record:
-            # Display the form with the existing data
-            with st.form("update_record_form"):
-                name = st.text_input("Name", value=record['name'])
-                try:
-                    release_date = st.date_input("Release Date", value=datetime.datetime.strptime(record['release_date'], '%Y-%m-%d').date())
-                except ValueError:
-                    release_date = st.date_input("Release Date", value=datetime.datetime.strptime(record['release_date'], '%b %d, %Y').date())
-                price = st.number_input("Price", min_value=0.0, step=0.01, value=record['price'])
-                discount_dlc_count = st.number_input("Discount DLC Count", min_value=0, step=1, value=record['discount_dlc_count'])
-                about = st.text_area("About", value=record['about'])
-                achievements = st.number_input("Achievements", min_value=0, step=1, value=record['achievements'])
-                notes = st.text_area("Notes", value=record['notes'])
-                developers = st.text_input("Developers", value=record['developers'])
-                publishers = st.text_input("Publishers", value=record['publishers'])
-                categories = st.text_input("Categories", value=record['categories'])
-                genres = st.text_input("Genres", value=record['genres'])
-                tags = st.text_input("Tags", value=record['tags'])
-                submit = st.form_submit_button("Update Record")
+    if submit:
+        # Prepare updated data
+        updated_data = {
+            'info_id': info_id,
+            'name': name,
+            'release_date': release_date.strftime('%Y-%m-%d'),
+            'price': price,
+            'discount_dlc_count': discount_dlc_count,
+            'about': about,
+            'achievements': achievements,
+            'notes': notes,
+            'developers': developers,
+            'publishers': publishers,
+            'categories': categories,
+            'genres': genres,
+            'tags': tags
+        }
 
-            if submit:
-                # Prepare updated data
-                updated_data = {
-                    'info_id': search_id,
-                    'name': name,
-                    'release_date': release_date.strftime('%Y-%m-%d'),
-                    'price': price,
-                    'discount_dlc_count': discount_dlc_count,
-                    'about': about,
-                    'achievements': achievements,
-                    'notes': notes,
-                    'developers': developers,
-                    'publishers': publishers,
-                    'categories': categories,
-                    'genres': genres,
-                    'tags': tags
-                }
-
-                # Determine old release year and delete from the old secondary node if necessary
-                old_release_year = datetime.datetime.strptime(record['release_date'], '%Y-%m-%d').year
-                new_release_year = release_date.year
-                if old_release_year < 2010 and new_release_year >= 2010:
-                    delete_data(search_id, DB_SERVER1)
-                    update_data(search_id, updated_data, DB_SERVER0)
-                    insert_data(pd.DataFrame([updated_data]), DB_SERVER2)
-                elif old_release_year >= 2010 and new_release_year < 2010:
-                    delete_data(search_id, DB_SERVER2)
-                    update_data(search_id, updated_data, DB_SERVER0)
-                    insert_data(pd.DataFrame([updated_data]), DB_SERVER1)
-                else:
-                    # Update the record in the central and current secondary node
-                    update_data(search_id, updated_data, DB_SERVER0)
-                    if new_release_year < 2010:
-                        update_data(search_id, updated_data, DB_SERVER1)
-                    else:
-                        update_data(search_id, updated_data, DB_SERVER2)
-
-                st.success("Record updated successfully!")
+        # Update the record in the central and current secondary node
+        update_data(info_id, updated_data, DB_SERVER0)
+        release_year = release_date.year
+        if release_year < 2010:
+            update_data(info_id, updated_data, DB_SERVER1)
         else:
-            st.error("No record found with this Info ID.")
+            update_data(info_id, updated_data, DB_SERVER2)
+
+        st.success("Record updated successfully!")
 
 elif page == "Delete Record":
     st.title("Delete a Record")
 
-    # Search for the record by info_id
-    search_id = st.number_input("Enter Info ID to search", min_value=1, step=1)
-    search_button = st.button("Search")
+    # Form to delete a record
+    with st.form("delete_record_form"):
+        info_id = st.number_input("Enter Info ID to delete", min_value=1, step=1)
+        delete = st.form_submit_button("Delete Record")
 
-    if search_button:
+    if delete:
+        try:
+            record = fetch_record_by_info_id(info_id)
+            if record:
+                delete_data(info_id, DB_SERVER0)
+                release_year = datetime.datetime.strptime(record['release_date'], '%Y-%m-%d').year
+                if release_year < 2010:
+                    delete_data(info_id, DB_SERVER1)
+                else:
+                    delete_data(info_id, DB_SERVER2)
+                st.success("Record deleted successfully!")
+            else:
+                st.error("No record found with this Info ID.")
+        except Exception as e:
+            st.error(f"Error deleting record: {e}")
+
+elif page == "Search Record":
+    st.title("Search for a Record")
+
+    # Form to search for a record
+    with st.form("search_record_form"):
+        search_id = st.number_input("Enter Info ID to search", min_value=1, step=1)
+        search = st.form_submit_button("Search Record")
+
+    if search:
         record = fetch_record_by_info_id(search_id)
         if record:
             # Display the record information
@@ -241,21 +267,5 @@ elif page == "Delete Record":
             st.write(f"**Categories:** {record['categories']}")
             st.write(f"**Genres:** {record['genres']}")
             st.write(f"**Tags:** {record['tags']}")
-
-            # Delete button
-            delete_button = st.button("Delete Record")
-
-            if delete_button:
-                # Delete the record from all nodes
-                try:
-                    delete_data(search_id, DB_SERVER0)
-                    release_year = datetime.datetime.strptime(record['release_date'], '%Y-%m-%d').year
-                    if release_year < 2010:
-                        delete_data(search_id, DB_SERVER1)
-                    else:
-                        delete_data(search_id, DB_SERVER2)
-                    st.success("Record deleted successfully!")
-                except Exception as e:
-                    st.error(f"Error deleting record: {e}")
         else:
             st.error("No record found with this Info ID.")
