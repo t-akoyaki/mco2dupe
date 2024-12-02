@@ -1,7 +1,10 @@
 import streamlit as st
 from sqlalchemy import create_engine, text
+from sqlalchemy.exc import OperationalError
 import pandas as pd
 import datetime
+import time
+import logging
 
 # Database connection strings for each node
 DB_SERVER0 = "mysql+pymysql://root:12345@ccscloud.dlsu.edu.ph:20272/mco2"
@@ -13,17 +16,35 @@ def get_db_connection(db_url):
     engine = create_engine(db_url)
     return engine.connect()
 
+def retry_db_operation(func, *args, retries=3, delay=5):
+    last_exception = None
+    for attempt in range(retries):
+        try:
+            return func(*args)
+        except OperationalError as e:
+            last_exception = e
+            st.warning(f"Attempt {attempt + 1} failed with error: {e}. Retrying...")
+            time.sleep(delay)
+    raise last_exception
+
 # Fetch data from the database
 def fetch_data(offset=0, limit=100):
     query = f"SELECT * FROM app_info LIMIT {limit} OFFSET {offset}"
+
+    return retry_db_operation(_fetch_data_internal, query)
+
+def _fetch_data_internal(query):
     with get_db_connection(DB_SERVER0) as connection:
         df = pd.read_sql(query, connection)
-        
     return df
 
 # Fetch a single record by info_id
 def fetch_record_by_info_id(info_id):
     query = text("SELECT * FROM app_info WHERE info_id = :info_id")
+
+    return retry_db_operation(_fetch_record_internal, query, info_id)
+
+def _fetch_record_internal(query, info_id):
     with get_db_connection(DB_SERVER0) as connection:
         result = connection.execute(query, {'info_id': info_id})
         record = result.fetchone()
@@ -35,6 +56,10 @@ def insert_data(data, db_url):
         INSERT INTO app_info (info_id, name, release_date, price, discount_dlc_count, about, achievements, notes, developers, publishers, categories, genres, tags)
         VALUES (:info_id, :name, :release_date, :price, :discount_dlc_count, :about, :achievements, :notes, :developers, :publishers, :categories, :genres, :tags)
     """)
+
+    return retry_db_operation(_insert_data_internal, query, data, db_url)
+
+def _insert_data_internal(query, data, db_url):
     with get_db_connection(db_url) as connection:
         trans = connection.begin()
         try:
@@ -62,6 +87,10 @@ def update_data(info_id, updated_data, db_url):
             tags = :tags
         WHERE info_id = :info_id
     """)
+
+    return retry_db_operation(_update_data_internal, query, updated_data, db_url)
+
+def _update_data_internal(query, updated_data, db_url):
     with get_db_connection(db_url) as connection:
         trans = connection.begin()
         try:
@@ -74,6 +103,10 @@ def update_data(info_id, updated_data, db_url):
 # Delete data from the database
 def delete_data(info_id, db_url):
     query = text("DELETE FROM app_info WHERE info_id = :info_id")
+
+    return retry_db_operation(_delete_data_internal, query, info_id, db_url)
+
+def _delete_data_internal(query, info_id, db_url):
     with get_db_connection(db_url) as connection:
         trans = connection.begin()
         try:
@@ -89,6 +122,10 @@ def check_duplicate_info_id(info_id):
     with get_db_connection(DB_SERVER0) as connection:
         result = connection.execute(query, {'info_id': info_id}).scalar()
     return result > 0
+
+# Simulating transaction delay to show concurrency
+def simulate_delay(seconds):
+    time.sleep(seconds)  # Delay in seconds
 
 # Streamlit application
 st.sidebar.title("CRUD Operations")
@@ -249,9 +286,16 @@ elif page == "Search Record":
     # Form to search for a record
     with st.form("search_record_form"):
         search_id = st.number_input("Enter Info ID to search", min_value=1, step=1)
+        delay_time = st.number_input("Add Delay (seconds)", min_value=0, step=1)
         search = st.form_submit_button("Search Record")
 
     if search:
+
+        # Simulate delay if selected
+        if delay_time > 0:
+            st.write(f"Simulating delay of {delay_time} seconds before performing the search...")
+            simulate_delay(delay_time)
+
         record = fetch_record_by_info_id(search_id)
         if record:
             # Display the record information
