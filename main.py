@@ -1,54 +1,127 @@
 import streamlit as st
 from sqlalchemy import create_engine, text
-from sqlalchemy.exc import OperationalError
 import pandas as pd
 import datetime
+import json
 import time
-import logging
 
 # Database connection strings for each node
 DB_SERVER0 = "mysql+pymysql://root:12345@ccscloud.dlsu.edu.ph:20272/mco2"
 DB_SERVER1 = "mysql+pymysql://root:12345@ccscloud.dlsu.edu.ph:20282/mco2"
 DB_SERVER2 = "mysql+pymysql://root:12345@ccscloud.dlsu.edu.ph:20292/mco2"
 
+LOG_FILE = "transaction_log.txt"
+RETRY_DELAY = 2  # Delay in seconds before retrying
+
 # Establish a connection to a database
 def get_db_connection(db_url):
     engine = create_engine(db_url)
     return engine.connect()
 
-def retry_db_operation(func, *args, retries=3, delay=5):
-    last_exception = None
-    for attempt in range(retries):
+# Function to log transactions
+def log_transaction(action, db_url, query, params):
+    try:
+        log_entry = {
+            "action": action,
+            "db_url": db_url,
+            "query": str(query),
+            "params": params,
+            "timestamp": datetime.datetime.now().isoformat()
+        }
+        with open(LOG_FILE, "a") as log_file:
+            log_file.write(json.dumps(log_entry) + "\n")
+    except Exception as e:
+        st.error(f"Error logging transaction: {e}")
+
+# Function to check if all servers are online
+def are_all_servers_online():
+    db_urls = [DB_SERVER0, DB_SERVER1, DB_SERVER2]
+    for db_url in db_urls:
         try:
-            return func(*args)
-        except OperationalError as e:
-            last_exception = e
-            st.warning(f"Attempt {attempt + 1} failed with error: {e}. Retrying...")
-            time.sleep(delay)
-    raise last_exception
+            with get_db_connection(db_url):
+                pass
+        except Exception as e:
+            st.warning(f"Could not connect to {db_url}: {e}")
+            return False
+    return True
+
+# Function to recover transactions
+def recover_transactions():
+    if not are_all_servers_online():
+        st.warning("Not all servers are online. Skipping recovery.")
+        return
+
+    try:
+        with open(LOG_FILE, "r") as log_file:
+            lines = log_file.readlines()
+
+        if not lines:
+            return
+
+        updated_logs = []
+        for line in lines:
+            try:
+                entry = json.loads(line.strip())
+                action = entry["action"]
+                db_url = entry["db_url"]
+                params = entry["params"]
+
+                attempt = 0
+                while attempt < 3:
+                    try:
+                        if action == "INSERT":
+                            insert_data(params, db_url)
+                        elif action == "UPDATE":
+                            update_data(params['info_id'], params, db_url)
+                        elif action == "DELETE":
+                            delete_data(params['info_id'], db_url)
+                        break
+                    except Exception as e:
+                        attempt += 1
+                        if attempt < 3:
+                            time.sleep(RETRY_DELAY)
+                        else:
+                            updated_logs.append(line)
+                            break
+            except json.JSONDecodeError:
+                continue
+
+        with open(LOG_FILE, "w") as log_file:
+            log_file.writelines(updated_logs)
+    except Exception as e:
+        st.error(f"Error during recovery: {e}")
 
 # Fetch data from the database
 def fetch_data(offset=0, limit=100):
     query = f"SELECT * FROM app_info LIMIT {limit} OFFSET {offset}"
-
-    return retry_db_operation(_fetch_data_internal, query)
-
-def _fetch_data_internal(query):
-    with get_db_connection(DB_SERVER0) as connection:
-        df = pd.read_sql(query, connection)
-    return df
+    db_urls = [DB_SERVER0, DB_SERVER1, DB_SERVER2]
+    
+    for db_url in db_urls:
+        try:
+            with get_db_connection(db_url) as connection:
+                df = pd.read_sql(query, connection)
+                return df
+        except Exception as e:
+            st.warning(f"Could not connect to {db_url}: {e}")
+            continue
+    return pd.DataFrame()
 
 # Fetch a single record by info_id
 def fetch_record_by_info_id(info_id):
     query = text("SELECT * FROM app_info WHERE info_id = :info_id")
-
-    return retry_db_operation(_fetch_record_internal, query, info_id)
-
-def _fetch_record_internal(query, info_id):
-    with get_db_connection(DB_SERVER0) as connection:
-        result = connection.execute(query, {'info_id': info_id})
-        record = result.fetchone()
-    return dict(record._mapping) if record else None
+    db_urls = [DB_SERVER0, DB_SERVER1, DB_SERVER2]
+    
+    for db_url in db_urls:
+        try:
+            with get_db_connection(db_url) as connection:
+                result = connection.execute(query, {'info_id': info_id})
+                record = result.fetchone()
+                if record:
+                    return dict(record._mapping)
+        except Exception as e:
+            st.warning(f"Could not connect to {db_url}: {e}")
+            continue
+    return None
 
 # Insert data into the database
 def insert_data(data, db_url):
@@ -56,18 +129,19 @@ def insert_data(data, db_url):
         INSERT INTO app_info (info_id, name, release_date, price, discount_dlc_count, about, achievements, notes, developers, publishers, categories, genres, tags)
         VALUES (:info_id, :name, :release_date, :price, :discount_dlc_count, :about, :achievements, :notes, :developers, :publishers, :categories, :genres, :tags)
     """)
-
-    return retry_db_operation(_insert_data_internal, query, data, db_url)
-
-def _insert_data_internal(query, data, db_url):
-    with get_db_connection(db_url) as connection:
-        trans = connection.begin()
-        try:
-            connection.execute(query, data)
-            trans.commit()
-        except Exception as e:
-            trans.rollback()
-            raise e
+    try:
+        with get_db_connection(db_url) as connection:
+            trans = connection.begin()
+            try:
+                connection.execute(query, data)
+                trans.commit()
+            except Exception as e:
+                trans.rollback()
+                log_transaction("INSERT", db_url, query, data)
+                raise e
+    except Exception as e:
+        log_transaction("INSERT", db_url, query, data)
+        raise e
 
 # Update data in the database
 def update_data(info_id, updated_data, db_url):
@@ -87,53 +161,62 @@ def update_data(info_id, updated_data, db_url):
             tags = :tags
         WHERE info_id = :info_id
     """)
-
-    return retry_db_operation(_update_data_internal, query, updated_data, db_url)
-
-def _update_data_internal(query, updated_data, db_url):
-    with get_db_connection(db_url) as connection:
-        trans = connection.begin()
-        try:
-            connection.execute(query, updated_data)
-            trans.commit()
-        except Exception as e:
-            trans.rollback()
-            raise e
+    try:
+        with get_db_connection(db_url) as connection:
+            trans = connection.begin()
+            try:
+                connection.execute(query, updated_data)
+                trans.commit()
+            except Exception as e: 
+                trans.rollback()
+                log_transaction("UPDATE", db_url, query, updated_data)
+                raise e
+    except Exception as e:
+        log_transaction("UPDATE", db_url, query, updated_data)
+        raise e
 
 # Delete data from the database
 def delete_data(info_id, db_url):
     query = text("DELETE FROM app_info WHERE info_id = :info_id")
-
-    return retry_db_operation(_delete_data_internal, query, info_id, db_url)
-
-def _delete_data_internal(query, info_id, db_url):
-    with get_db_connection(db_url) as connection:
-        trans = connection.begin()
-        try:
-            connection.execute(query, {'info_id': info_id})
-            trans.commit()
-        except Exception as e:
-            trans.rollback()
-            raise e
+    try:
+        with get_db_connection(db_url) as connection:
+            trans = connection.begin()
+            try:
+                connection.execute(query, {'info_id': info_id})
+                trans.commit()
+            except Exception as e:
+                trans.rollback()
+                log_transaction("DELETE", db_url, query, {'info_id': info_id})
+                raise e
+    except Exception as e:
+        log_transaction("DELETE", db_url, query, {'info_id': info_id})
+        raise e
 
 # Check if info_id already exists in the database
 def check_duplicate_info_id(info_id):
     query = text("SELECT COUNT(*) FROM app_info WHERE info_id = :info_id")
-    with get_db_connection(DB_SERVER0) as connection:
-        result = connection.execute(query, {'info_id': info_id}).scalar()
-    return result > 0
-
-# Simulating transaction delay to show concurrency
-def simulate_delay(seconds):
-    time.sleep(seconds)  # Delay in seconds
+    db_urls = [DB_SERVER0, DB_SERVER1, DB_SERVER2]
+    
+    for db_url in db_urls:
+        try:
+            with get_db_connection(db_url) as connection:
+                result = connection.execute(query, {'info_id': info_id}).scalar()
+                if result > 0:
+                    return True
+        except Exception as e:
+            st.warning(f"Could not connect to {db_url}: {e}")
+            continue
+    return False
 
 # Streamlit application
 st.sidebar.title("CRUD Operations")
 page = st.sidebar.selectbox("Select a Page", ["View Data", "Add Record", "Update Record", "Delete Record", "Search Record"])
 
+# Run recovery transactions on page load
+recover_transactions()
+
 if page == "View Data":
     st.title("Steam Games Dataset Viewer - Server0")
-
     # Pagination logic
     if 'offset' not in st.session_state:
         st.session_state['offset'] = 0
@@ -197,14 +280,20 @@ elif page == "Add Record":
             }
 
             # Insert data into the central node (Server0)
-            insert_data(new_record, DB_SERVER0)
+            try:
+                insert_data(new_record, DB_SERVER0)
+            except Exception as e:
+                st.error(f"Error inserting record into Server0: {e}")
 
             # Determine which node to insert based on release date
             release_year = release_date.year
-            if release_year < 2010:
-                insert_data(new_record, DB_SERVER1)
-            else:
-                insert_data(new_record, DB_SERVER2)
+            try:
+                if release_year < 2010:
+                    insert_data(new_record, DB_SERVER1)
+                else:
+                    insert_data(new_record, DB_SERVER2)
+            except Exception as e:
+                st.error(f"Error inserting record into secondary server: {e}")
 
             st.success("Record added successfully!")
 
@@ -246,13 +335,21 @@ elif page == "Update Record":
             'tags': tags
         }
 
-        # Update the record in the central and current secondary node
-        update_data(info_id, updated_data, DB_SERVER0)
+        # Update the record in the central node (Server0)
+        try:
+            update_data(info_id, updated_data, DB_SERVER0)
+        except Exception as e:
+            st.error(f"Error updating record in Server0: {e}")
+
+        # Update the record in the current secondary node
         release_year = release_date.year
-        if release_year < 2010:
-            update_data(info_id, updated_data, DB_SERVER1)
-        else:
-            update_data(info_id, updated_data, DB_SERVER2)
+        try:
+            if release_year < 2010:
+                update_data(info_id, updated_data, DB_SERVER1)
+            else:
+                update_data(info_id, updated_data, DB_SERVER2)
+        except Exception as e:
+            st.error(f"Error updating record in secondary server: {e}")
 
         st.success("Record updated successfully!")
 
@@ -268,34 +365,35 @@ elif page == "Delete Record":
         try:
             record = fetch_record_by_info_id(info_id)
             if record:
-                delete_data(info_id, DB_SERVER0)
+                try:
+                    delete_data(info_id, DB_SERVER0)
+                except Exception as e:
+                    st.error(f"Error deleting record from Server0: {e}")
+
                 release_year = datetime.datetime.strptime(record['release_date'], '%Y-%m-%d').year
-                if release_year < 2010:
-                    delete_data(info_id, DB_SERVER1)
-                else:
-                    delete_data(info_id, DB_SERVER2)
+                try:
+                    if release_year < 2010:
+                        delete_data(info_id, DB_SERVER1)
+                    else:
+                        delete_data(info_id, DB_SERVER2)
+                except Exception as e:
+                    st.error(f"Error deleting record from secondary server: {e}")
+
                 st.success("Record deleted successfully!")
             else:
                 st.error("No record found with this Info ID.")
         except Exception as e:
-            st.error(f"Error deleting record: {e}")
+            st.error(f"Error fetching record: {e}")
 
 elif page == "Search Record":
     st.title("Search for a Record")
-
+    recover_transactions()
     # Form to search for a record
     with st.form("search_record_form"):
         search_id = st.number_input("Enter Info ID to search", min_value=1, step=1)
-        delay_time = st.number_input("Add Delay (seconds)", min_value=0, step=1)
         search = st.form_submit_button("Search Record")
 
     if search:
-
-        # Simulate delay if selected
-        if delay_time > 0:
-            st.write(f"Simulating delay of {delay_time} seconds before performing the search...")
-            simulate_delay(delay_time)
-
         record = fetch_record_by_info_id(search_id)
         if record:
             # Display the record information
@@ -313,3 +411,7 @@ elif page == "Search Record":
             st.write(f"**Tags:** {record['tags']}")
         else:
             st.error("No record found with this Info ID.")
+
+if __name__ == "__main__":
+    # Initial recovery on app start
+    recover_transactions() 
