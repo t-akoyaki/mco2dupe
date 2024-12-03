@@ -114,10 +114,12 @@ def fetch_record_by_info_id(info_id):
     for db_url in db_urls:
         try:
             with get_db_connection(db_url) as connection:
-                result = connection.execute(query, {'info_id': info_id})
-                record = result.fetchone()
-                if record:
-                    return dict(record._mapping)
+                with connection.begin():
+                    time.sleep(10)
+                    result = connection.execute(query, {'info_id': info_id})
+                    record = result.fetchone()
+                    if record:
+                        return dict(record._mapping)
         except Exception as e:
             st.warning(f"Could not connect to {db_url}: {e}")
             continue
@@ -394,6 +396,7 @@ elif page == "Search Record":
         search = st.form_submit_button("Search Record")
 
     if search:
+        st.write("Delaying for 10 seconds...")
         record = fetch_record_by_info_id(search_id)
         if record:
             # Display the record information
