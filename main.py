@@ -115,6 +115,7 @@ def fetch_record_by_info_id(info_id):
         try:
             with get_db_connection(db_url) as connection:
                 with connection.begin():
+                    result = connection.execute(query, {'info_id': info_id})
                     st.write("Delaying for 10 seconds...")
                     time.sleep(10)
                     result = connection.execute(query, {'info_id': info_id})
