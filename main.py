@@ -108,7 +108,7 @@ def fetch_data(offset=0, limit=100):
 
 # Fetch a single record by info_id
 def fetch_record_by_info_id(info_id):
-    query = text("SELECT * FROM app_info WHERE info_id = :info_id FOR SHARE")
+    query = text("SELECT * FROM app_info WHERE info_id = :info_id") #FOR SHARE
     #lock_query = text("LOCK TABLE app_info IN SHARE MODE")
     db_urls = [DB_SERVER0, DB_SERVER1, DB_SERVER2]
     
