@@ -109,6 +109,7 @@ def fetch_data(offset=0, limit=100):
 # Fetch a single record by info_id
 def fetch_record_by_info_id(info_id):
     query = text("SELECT * FROM app_info WHERE info_id = :info_id FOR SHARE")
+    #lock_query = text("LOCK TABLE app_info IN SHARE MODE")
     db_urls = [DB_SERVER0, DB_SERVER1, DB_SERVER2]
     
     for db_url in db_urls:
@@ -116,7 +117,7 @@ def fetch_record_by_info_id(info_id):
             with get_db_connection(db_url) as connection:
                 with connection.begin(): #begin transaction
                     connection.execute(query, {'info_id': info_id}) #for locking
-                    st.write("Delaying for 10 seconds...")
+                    st.write("(frbii) Delaying for 10 seconds...")
                     time.sleep(10) #wait to mimic concurrency
                     result = connection.execute(query, {'info_id': info_id}) #check if value changed
                     record = result.fetchone()
@@ -164,14 +165,13 @@ def update_data(info_id, updated_data, db_url):
             genres = :genres,
             tags = :tags
         WHERE info_id = :info_id
-        FOR UPDATE
     """)
     try:
         with get_db_connection(db_url) as connection:
             trans = connection.begin()
             try:
                 connection.execute(query, updated_data)
-                st.write("Delaying for 10 seconds...")
+                st.write("(update) Delaying for 10 seconds...")
                 time.sleep(10)
                 trans.commit()
             except Exception as e: 
